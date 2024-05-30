@@ -359,6 +359,10 @@ python -m sglang.launch_server --model-path meta-llama/Llama-2-7b-chat-hf --port
 ```
 python -m sglang.launch_server --model-path meta-llama/Llama-2-7b-chat-hf --port 30000 --tp 2
 ```
+- Add `--dp 2` to enable data parallelism. It can also be used together with tp. Data parallelism is better for throughput if there is enough memory.
+```
+python -m sglang.launch_server --model-path meta-llama/Llama-2-7b-chat-hf --port 30000 --dp 2 --tp 2
+```
 - If you see out-of-memory errors during serving, please try to reduce the memory usage of the KV cache pool by setting a smaller value of `--mem-fraction-static`. The default value is `0.9`
 ```
 python -m sglang.launch_server --model-path meta-llama/Llama-2-7b-chat-hf --port 30000 --mem-fraction-static 0.7
@@ -377,6 +381,8 @@ python -m sglang.launch_server --model-path meta-llama/Llama-2-7b-chat-hf --port
   - `python3 -m sglang.launch_server --model-path liuhaotian/llava-v1.5-7b --tokenizer-path llava-hf/llava-1.5-7b-hf --chat-template vicuna_v1.1 --port 30000`
   - `python3 -m sglang.launch_server --model-path liuhaotian/llava-v1.6-vicuna-7b --tokenizer-path llava-hf/llava-1.5-7b-hf --chat-template vicuna_v1.1 --port 30000`
   - `python3 -m sglang.launch_server --model-path liuhaotian/llava-v1.6-34b --tokenizer-path liuhaotian/llava-v1.6-34b-tokenizer --port 3000`
+- LLaVA-NeXT-Video
+  - see [srt_example_llava_v.sh](examples/usage/llava_video/srt_example_llava_v.sh)
 - Yi-VL
   - see [srt_example_yi_vl.py](examples/quick_start/srt_example_yi_vl.py).
 - StableLM

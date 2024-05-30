@@ -9,7 +9,8 @@ import os
 import sys
 import threading
 import time
-from typing import List, Optional, Union
+from http import HTTPStatus
+from typing import Optional
 
 # Fix a bug of Python threading
 setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
@@ -27,22 +28,23 @@ from sglang.srt.constrained import disable_cache
 from sglang.srt.hf_transformers_utils import get_tokenizer
 from sglang.srt.managers.detokenizer_manager import start_detokenizer_process
 from sglang.srt.managers.io_struct import GenerateReqInput
-from sglang.srt.managers.router.manager import start_router_process
+from sglang.srt.managers.controller.manager_single import start_controller_process as start_controller_process_single
+from sglang.srt.managers.controller.manager_multi import start_controller_process as start_controller_process_multi
 from sglang.srt.managers.tokenizer_manager import TokenizerManager
 from sglang.srt.openai_api_adapter import (
     load_chat_template_for_openai_api,
     v1_chat_completions,
     v1_completions,
 )
-from sglang.srt.server_args import PortArgs, ServerArgs
+from sglang.srt.server_args import ModelPortArgs, PortArgs, ServerArgs
 from sglang.srt.utils import (
     API_KEY_HEADER_NAME,
     APIKeyValidatorMiddleware,
     allocate_init_ports,
     assert_pkg_version,
     enable_show_time_cost,
-    get_exception_traceback,
 )
+from sglang.utils import get_exception_traceback
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
@@ -72,7 +74,7 @@ async def get_server_args():
 
 @app.get("/flush_cache")
 async def flush_cache():
-    await tokenizer_manager.flush_cache()
+    tokenizer_manager.flush_cache()
     return Response(
         content="Cache flushed.\nPlease check backend logs for more details. "
         "(When there are running or waiting requests, the operation will not be performed.)\n",
@@ -80,24 +82,32 @@ async def flush_cache():
     )
 
 
-@app.post("/generate")
-async def generate_request(obj: GenerateReqInput):
-    obj.post_init()
-
+async def generate_request(obj: GenerateReqInput, request: Request):
     if obj.stream:
 
         async def stream_results():
-            async for out in tokenizer_manager.generate_request(obj):
+            try:
+                async for out in tokenizer_manager.generate_request(obj, request):
+                    yield f"data: {json.dumps(out, ensure_ascii=False)}\n\n"
+            except ValueError as e:
+                out = {"error": {"message": str(e)}}
                 yield f"data: {json.dumps(out, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
 
-        return StreamingResponse(stream_results(), media_type="text/event-stream")
+        return StreamingResponse(stream_results(), media_type="text/event-stream",
+                                 background=tokenizer_manager.create_abort_task(obj))
+    else:
+        try:
+            ret = await tokenizer_manager.generate_request(obj, request).__anext__()
+            return ret
+        except ValueError as e:
+            return JSONResponse(
+                {"error": {"message": str(e)}}, status_code=HTTPStatus.BAD_REQUEST
+            )
 
-    try:
-        ret = await tokenizer_manager.generate_request(obj).__anext__()
-        return ret
-    except ValueError as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
+
+app.post("/generate")(generate_request)
+app.put("/generate")(generate_request)
 
 
 @app.post("/v1/completions")
@@ -132,14 +142,28 @@ def launch_server(server_args: ServerArgs, pipe_finish_writer, model_overide_arg
 
     # Allocate ports
     server_args.port, server_args.additional_ports = allocate_init_ports(
-        server_args.port, server_args.additional_ports, server_args.tp_size
+        server_args.port,
+        server_args.additional_ports,
+        server_args.tp_size,
+        server_args.dp_size,
     )
+
+    # Init local models port args
+    ports = server_args.additional_ports
+    tp = server_args.tp_size
+    model_port_args = []
+    for i in range(server_args.dp_size):
+        model_port_args.append(
+            ModelPortArgs(
+                nccl_port=ports[3 + i * (tp + 1)],
+                model_tp_ports=ports[3 + i * (tp + 1) + 1 : 3 + (i + 1) * (tp + 1)],
+            )
+        )
     port_args = PortArgs(
-        tokenizer_port=server_args.additional_ports[0],
-        router_port=server_args.additional_ports[1],
-        detokenizer_port=server_args.additional_ports[2],
-        nccl_port=server_args.additional_ports[3],
-        model_rpc_ports=server_args.additional_ports[4:],
+        tokenizer_port=ports[0],
+        router_port=ports[1],
+        detokenizer_port=ports[2],
+        model_port_args=model_port_args,
     )
 
     # Launch processes
@@ -147,8 +171,12 @@ def launch_server(server_args: ServerArgs, pipe_finish_writer, model_overide_arg
     pipe_router_reader, pipe_router_writer = mp.Pipe(duplex=False)
     pipe_detoken_reader, pipe_detoken_writer = mp.Pipe(duplex=False)
 
+    if server_args.dp_size == 1:
+        start_process = start_controller_process_single
+    else:
+        start_process = start_controller_process_multi
     proc_router = mp.Process(
-        target=start_router_process,
+        target=start_process,
         args=(server_args, port_args, pipe_router_writer, model_overide_args),
     )
     proc_router.start()
@@ -182,6 +210,7 @@ def launch_server(server_args: ServerArgs, pipe_finish_writer, model_overide_arg
     if server_args.api_key and server_args.api_key != "":
         app.add_middleware(APIKeyValidatorMiddleware, api_key=server_args.api_key)
 
+    # Send a warmup request
     def _wait_and_warmup():
         headers = {}
         url = server_args.url()
@@ -193,7 +222,6 @@ def launch_server(server_args: ServerArgs, pipe_finish_writer, model_overide_arg
             time.sleep(0.5)
             try:
                 requests.get(url + "/get_model_info", timeout=5, headers=headers)
-                success = True  # Set flag to True if request succeeds
                 break
             except requests.exceptions.RequestException as e:
                 pass
@@ -203,7 +231,7 @@ def launch_server(server_args: ServerArgs, pipe_finish_writer, model_overide_arg
             res = requests.post(
                 url + "/generate",
                 json={
-                    "text": "Say this is a warmup request.",
+                    "text": "The capital city of France is",
                     "sampling_params": {
                         "temperature": 0,
                         "max_new_tokens": 16,
@@ -224,6 +252,8 @@ def launch_server(server_args: ServerArgs, pipe_finish_writer, model_overide_arg
 
     t = threading.Thread(target=_wait_and_warmup)
     t.start()
+
+    # Listen for requests
     try:
         uvicorn.run(
             app,
@@ -240,19 +270,20 @@ def launch_server(server_args: ServerArgs, pipe_finish_writer, model_overide_arg
 class Runtime:
     def __init__(
         self,
-        log_evel: str = "error",
+        log_level: str = "error",
         model_overide_args: Optional[dict] = None,
         *args,
         **kwargs,
     ):
         """See the arguments in server_args.py::ServerArgs"""
-        self.server_args = ServerArgs(*args, log_level=log_evel, **kwargs)
+        self.server_args = ServerArgs(*args, log_level=log_level, **kwargs)
 
         # Pre-allocate ports
         self.server_args.port, self.server_args.additional_ports = allocate_init_ports(
             self.server_args.port,
             self.server_args.additional_ports,
             self.server_args.tp_size,
+            self.server_args.dp_size,
         )
 
         self.url = self.server_args.url()

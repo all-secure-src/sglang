@@ -15,6 +15,7 @@ class ServerArgs:
     chat_template: Optional[str] = None
     trust_remote_code: bool = True
     context_length: Optional[int] = None
+    quantization: Optional[str] = None
 
     # Port
     host: str = "127.0.0.1"
@@ -23,14 +24,15 @@ class ServerArgs:
 
     # Memory and scheduling
     mem_fraction_static: Optional[float] = None
-    max_prefill_num_token: Optional[int] = None
+    max_prefill_tokens: Optional[int] = None
+    max_running_requests: Optional[int] = None
     schedule_heuristic: str = "lpm"
     schedule_conservativeness: float = 1.0
 
     # Other runtime options
     tp_size: int = 1
     stream_interval: int = 8
-    random_seed: int = 42
+    random_seed: Optional[int] = None
 
     # Logging
     log_level: str = "info"
@@ -41,6 +43,10 @@ class ServerArgs:
 
     # Other
     api_key: str = ""
+
+    # Data parallelism
+    dp_size: int = 1
+    load_balance_method: str = "round_robin"
 
     # Optimization/debug options
     enable_flashinfer: bool = False
@@ -136,16 +142,28 @@ class ServerArgs:
             help="The model's maximum context length. Defaults to None (will use the value from the model's config.json instead).",
         )
         parser.add_argument(
+            "--quantization",
+            type=str,
+            default=ServerArgs.quantization,
+            help="The quantization method.",
+        )
+        parser.add_argument(
             "--mem-fraction-static",
             type=float,
             default=ServerArgs.mem_fraction_static,
             help="The fraction of the memory used for static allocation (model weights and KV cache memory pool). Use a smaller value if you see out-of-memory errors.",
         )
         parser.add_argument(
-            "--max-prefill-num-token",
+            "--max-prefill-tokens",
             type=int,
-            default=ServerArgs.max_prefill_num_token,
+            default=ServerArgs.max_prefill_tokens,
             help="The maximum number of tokens in a prefill batch. The real bound will be the maximum of this value and the model's maximum context length.",
+        )
+        parser.add_argument(
+            "--max-running-requests",
+            type=int,
+            default=ServerArgs.max_running_requests,
+            help="The maximum number of running requests.",
         )
         parser.add_argument(
             "--schedule-heuristic",
@@ -176,7 +194,7 @@ class ServerArgs:
             "--random-seed",
             type=int,
             default=ServerArgs.random_seed,
-            help="Random seed.",
+            help="The global random seed of the server.",
         )
         parser.add_argument(
             "--log-level",
@@ -210,6 +228,24 @@ class ServerArgs:
             type=str,
             default=ServerArgs.api_key,
             help="Set API key of the server",
+        )
+
+        # Data parallelism
+        parser.add_argument(
+            "--dp-size",
+            type=int,
+            default=ServerArgs.dp_size,
+            help="Data parallelism size.",
+        )
+        parser.add_argument(
+            "--load-balance-method",
+            type=str,
+            default=ServerArgs.load_balance_method,
+            help="Load balancing strategy for data parallelism.",
+            choices=[
+                "round_robin",
+                "shortest_queue",
+            ],
         )
 
         # Optimization/debug options
@@ -258,9 +294,14 @@ class ServerArgs:
 
 
 @dataclasses.dataclass
+class ModelPortArgs:
+    nccl_port: int
+    model_tp_ports: List[int]
+
+
+@dataclasses.dataclass
 class PortArgs:
     tokenizer_port: int
     router_port: int
     detokenizer_port: int
-    nccl_port: int
-    model_rpc_ports: List[int]
+    model_port_args: List[ModelPortArgs]
