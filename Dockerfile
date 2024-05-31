@@ -7,8 +7,11 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     python3-dev
 
+# Create a symbolic link for python
+RUN ln -s /usr/bin/python3 /usr/bin/python
+
 # Print Python and pip versions for debugging
-RUN python3 --version && pip3 --version
+RUN python --version && pip --version
 
 RUN pip install -e "python[all]" && \
     pip install datasets

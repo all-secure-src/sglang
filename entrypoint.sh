@@ -11,4 +11,4 @@ else
     model_path="$MODEL_PATH"
 fi
 
-python -m sglang.launch_server --model-path $model_path --port 8080 --mem-fraction-static 0.98 --context-length $CONTEXT_LENGTH
+python3 -m sglang.launch_server --model-path $model_path --port 8080 --mem-fraction-static 0.98 --context-length $CONTEXT_LENGTH
